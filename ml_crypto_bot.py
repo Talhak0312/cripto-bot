@@ -38,9 +38,9 @@ API_KEY = "LCRYKTbUeLyEVi7EUCHid7f0n7iRowyLb90PEqGve6pdEKUuuY62RjrQbQfnau8o"
 API_SECRET = "ThaB1p140sREEqMsu32g62N7pYoSLp5nXLFCgebncpa76u0dR76IF8JXu1PvFDA3"
 
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-BUDGET_LIMIT_USDT = 20.0
-TOP_COINS_COUNT = 20
-LOOP_INTERVAL_SECONDS = 180
+BUDGET_LIMIT_USDT = 20.0                   # Testnet ve Gerçek İşlem Bütçesi ($20)
+TOP_COINS_COUNT = 20                       # En hacimli 20 coin
+LOOP_INTERVAL_SECONDS = 180                # Her 3 dakikada bir kontrol
 
 STATE_FILE = "bot_state.json"
 LOG_FILE = "trade_log.txt"
@@ -69,30 +69,28 @@ def save_state(state):
 def safe_binance_client():
     for attempt in range(5):
         try:
-            # API anahtarlarıyla istemci oluşturuluyor
             client = Client(API_KEY, API_SECRET, testnet=True)
             client.ping()
             return client
-        except Exception as e:
+        except Exception:
             time.sleep(2)
     return None
 
 def get_top_volume_usdt_pairs_fallback():
-    # Binance kütüphanesi takılırsa direkt REST API ile hacimli coinleri çeker
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
         res = requests.get(url, timeout=10).json()
-        usdt_pairs = [
-            t for t in res 
-            if t['symbol'].endswith('USDT') 
-            and not t['symbol'].startswith('USDC') 
-            and not t['symbol'].startswith('FDUSD')
-        ]
-        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
-        return [p['symbol'] for p in sorted_pairs[:TOP_COINS_COUNT]]
+        if isinstance(res, list):
+            usdt_pairs = [
+                t for t in res 
+                if isinstance(t, dict) and t.get('symbol', '').endswith('USDT') 
+                and not t['symbol'].startswith(('USDC', 'FDUSD'))
+            ]
+            sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
+            return [p['symbol'] for p in sorted_pairs[:TOP_COINS_COUNT]]
     except Exception as e:
-        log(f"REST API Hacim Taraması Hatası: {e}")
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]
+        log(f"Hacim Taraması Hatası: {e}")
+    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]
 
 def build_features(df):
     df["SMA20"] = df["Close"].rolling(20).mean()
@@ -129,7 +127,6 @@ def run_bot_cycle():
     client = safe_binance_client()
     state = load_state()
     
-    # Kütüphane çalışmazsa verileri doğrudan Binance REST endpoint'lerinden çeker
     if state["in_position"]:
         symbol = state["active_symbol"]
         buy_price = state["buy_price"]
