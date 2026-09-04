@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import threading
@@ -9,12 +10,21 @@ from datetime import datetime
 from binance.client import Client
 from sklearn.ensemble import RandomForestClassifier
 
-# Render'ın servisi açık tutması için minik web sunucusu
+# Çıktıların (print) Render konsoluna anında düşmesini sağlar
+sys.stdout.reconfigure(line_buffering=True)
+
+# Render'ın servisi kapatmaması ve kontrol isteklerine (HEAD/GET) 200 dönmesi için HTTP sunucusu
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Kripto AI Botu 7/24 Aktif!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
 
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
@@ -39,19 +49,28 @@ LOG_FILE = "trade_log.txt"
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
-    print(line)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {"in_position": False, "active_symbol": None, "buy_price": 0.0}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
 
 def safe_binance_client():
     for attempt in range(5):
@@ -128,7 +147,7 @@ def run_bot_cycle():
             state["active_symbol"] = None
             state["buy_price"] = 0.0
             save_state(state)
-            log("Pozisyon kapatıldı.")
+            log("Pozisyon kapatıldı (Nakit duruma geçildi).")
         return
 
     log("=== PİYASA TARAMASI BAŞLADI (En Hacimli 20 Coin) ===")
@@ -155,7 +174,7 @@ def run_bot_cycle():
         except Exception:
             continue
             
-    log(f"En Yüksek Fırsat: {best_symbol} (AI İhtimali: %{best_prob*100:.1f})")
+    log(f"En Yüksek Fırsat: {best_symbol} (AI Yükseliş İhtimali: %{best_prob*100:.1f})")
     
     if best_prob >= 0.55:
         log(f"--- GÜÇLÜ SİNYAL! {best_symbol} alınıyor... ---")
