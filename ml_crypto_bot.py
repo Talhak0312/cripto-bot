@@ -1,11 +1,28 @@
 import os
 import json
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from binance.client import Client
 from sklearn.ensemble import RandomForestClassifier
+
+# Render'ın servisi açık tutması için minik web sunucusu
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Kripto AI Botu 7/24 Aktif!")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# Arka planda HTTP sunucusunu başlat
+threading.Thread(target=run_http_server, daemon=True).start()
 
 # ================= AYARLAR =================
 API_KEY = "LCRYKTbUeLyEVi7EUCHid7f0n7iRowyLb90PEqGve6pdEKUuuY62RjrQbQfnau8o"
@@ -14,7 +31,7 @@ API_SECRET = "ThaB1p140sREEqMsu32g62N7pYoSLp5nXLFCgebncpa76u0dR76IF8JXu1PvFDA3"
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE  # 15 Dakikalık mumlar
 BUDGET_LIMIT_USDT = 20.0                   # 20$ Bütçe
 TOP_COINS_COUNT = 20                       # En hacimli 20 coin
-LOOP_INTERVAL_SECONDS = 180                # Her 180 saniyede (3 dakikada) bir piyasayı kontrol et
+LOOP_INTERVAL_SECONDS = 180                # Her 3 dakikada bir kontrol et
 
 STATE_FILE = "bot_state.json"
 LOG_FILE = "trade_log.txt"
@@ -95,7 +112,6 @@ def run_bot_cycle():
 
     state = load_state()
     
-    # 1. POZİSYONDAYSAK KONTROL ET
     if state["in_position"]:
         symbol = state["active_symbol"]
         buy_price = state["buy_price"]
@@ -106,17 +122,15 @@ def run_bot_cycle():
         
         log(f"TAKİP: {symbol} | Alış: {buy_price} | Güncel: {current_price} | Kâr/Zarar: %{change_pct*100:.2f}")
         
-        # Stop-Loss (-%1.0) veya Take-Profit (+%2.0)
         if change_pct <= -0.010 or change_pct >= 0.020:
             log(f"--- SAT SİNYALİ ({symbol})! Kâr/Zarar: %{change_pct*100:.2f} ---")
             state["in_position"] = False
             state["active_symbol"] = None
             state["buy_price"] = 0.0
             save_state(state)
-            log("Pozisyon kapatıldı (Nakit duruma geçildi).")
+            log("Pozisyon kapatıldı.")
         return
 
-    # 2. PİYASA TARAMASI (20 COIN)
     log("=== PİYASA TARAMASI BAŞLADI (En Hacimli 20 Coin) ===")
     top_symbols = get_top_volume_usdt_pairs(public_client, limit=TOP_COINS_COUNT)
     
@@ -141,7 +155,7 @@ def run_bot_cycle():
         except Exception:
             continue
             
-    log(f"En Yüksek Fırsat: {best_symbol} (AI Yükseliş İhtimali: %{best_prob*100:.1f})")
+    log(f"En Yüksek Fırsat: {best_symbol} (AI İhtimali: %{best_prob*100:.1f})")
     
     if best_prob >= 0.55:
         log(f"--- GÜÇLÜ SİNYAL! {best_symbol} alınıyor... ---")
@@ -153,14 +167,11 @@ def run_bot_cycle():
     else:
         log("Yeterli alım fırsatı yok, bekleniyor.")
 
-# SONSUR DÖNGÜ (Kendi Kendine Çalışan Yapı)
 if __name__ == "__main__":
-    log("Kripto Yapay Zeka Botu 7/24 Kesintisiz Moda Geçti.")
+    log("Kripto Yapay Zeka Botu Render Üzerinde 7/24 Kesintisiz Moda Geçti.")
     while True:
         try:
             run_bot_cycle()
         except Exception as e:
             log(f"Döngü hatası: {e}")
-            
-        # 3 dakika bekle ve tekrar çalıştır
         time.sleep(LOOP_INTERVAL_SECONDS)
