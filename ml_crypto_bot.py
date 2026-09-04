@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import pandas as pd
@@ -10,10 +11,9 @@ from datetime import datetime
 from binance.client import Client
 from sklearn.ensemble import RandomForestClassifier
 
-# Çıktıların (print) Render konsoluna anında düşmesini sağlar
+# Çıktıların anında Render konsoluna yazılmasını sağlar
 sys.stdout.reconfigure(line_buffering=True)
 
-# Render'ın servisi kapatmaması ve kontrol isteklerine (HEAD/GET) 200 dönmesi için HTTP sunucusu
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -31,17 +31,16 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-# Arka planda HTTP sunucusunu başlat
 threading.Thread(target=run_http_server, daemon=True).start()
 
 # ================= AYARLAR =================
 API_KEY = "LCRYKTbUeLyEVi7EUCHid7f0n7iRowyLb90PEqGve6pdEKUuuY62RjrQbQfnau8o"
 API_SECRET = "ThaB1p140sREEqMsu32g62N7pYoSLp5nXLFCgebncpa76u0dR76IF8JXu1PvFDA3"
 
-INTERVAL = Client.KLINE_INTERVAL_15MINUTE  # 15 Dakikalık mumlar
-BUDGET_LIMIT_USDT = 20.0                   # 20$ Bütçe
-TOP_COINS_COUNT = 20                       # En hacimli 20 coin
-LOOP_INTERVAL_SECONDS = 180                # Her 3 dakikada bir kontrol et
+INTERVAL = Client.KLINE_INTERVAL_15MINUTE
+BUDGET_LIMIT_USDT = 20.0
+TOP_COINS_COUNT = 20
+LOOP_INTERVAL_SECONDS = 180
 
 STATE_FILE = "bot_state.json"
 LOG_FILE = "trade_log.txt"
@@ -50,11 +49,6 @@ def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
     print(line, flush=True)
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -75,22 +69,30 @@ def save_state(state):
 def safe_binance_client():
     for attempt in range(5):
         try:
-            client = Client()
+            # API anahtarlarıyla istemci oluşturuluyor
+            client = Client(API_KEY, API_SECRET, testnet=True)
+            client.ping()
             return client
-        except Exception:
-            time.sleep(3)
+        except Exception as e:
+            time.sleep(2)
     return None
 
-def get_top_volume_usdt_pairs(client, limit=20):
-    tickers = client.get_ticker()
-    usdt_pairs = [
-        t for t in tickers 
-        if t['symbol'].endswith('USDT') 
-        and not t['symbol'].startswith('USDC') 
-        and not t['symbol'].startswith('FDUSD')
-    ]
-    sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
-    return [p['symbol'] for p in sorted_pairs[:limit]]
+def get_top_volume_usdt_pairs_fallback():
+    # Binance kütüphanesi takılırsa direkt REST API ile hacimli coinleri çeker
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        res = requests.get(url, timeout=10).json()
+        usdt_pairs = [
+            t for t in res 
+            if t['symbol'].endswith('USDT') 
+            and not t['symbol'].startswith('USDC') 
+            and not t['symbol'].startswith('FDUSD')
+        ]
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
+        return [p['symbol'] for p in sorted_pairs[:TOP_COINS_COUNT]]
+    except Exception as e:
+        log(f"REST API Hacim Taraması Hatası: {e}")
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]
 
 def build_features(df):
     df["SMA20"] = df["Close"].rolling(20).mean()
@@ -124,21 +126,26 @@ def train_and_predict(df):
     return prob
 
 def run_bot_cycle():
-    public_client = safe_binance_client()
-    if not public_client:
-        log("Binance bağlantısı sağlanamadı, bir sonraki döngüde tekrar denenecek.")
-        return
-
+    client = safe_binance_client()
     state = load_state()
     
+    # Kütüphane çalışmazsa verileri doğrudan Binance REST endpoint'lerinden çeker
     if state["in_position"]:
         symbol = state["active_symbol"]
         buy_price = state["buy_price"]
         
-        klines = public_client.get_klines(symbol=symbol, interval=INTERVAL, limit=10)
-        current_price = float(klines[-1][4])
+        try:
+            if client:
+                klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=5)
+                current_price = float(klines[-1][4])
+            else:
+                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                current_price = float(requests.get(url, timeout=5).json()['price'])
+        except Exception as e:
+            log(f"Fiyat çekilemedi ({symbol}): {e}")
+            return
+
         change_pct = (current_price - buy_price) / buy_price
-        
         log(f"TAKİP: {symbol} | Alış: {buy_price} | Güncel: {current_price} | Kâr/Zarar: %{change_pct*100:.2f}")
         
         if change_pct <= -0.010 or change_pct >= 0.020:
@@ -147,11 +154,11 @@ def run_bot_cycle():
             state["active_symbol"] = None
             state["buy_price"] = 0.0
             save_state(state)
-            log("Pozisyon kapatıldı (Nakit duruma geçildi).")
+            log("Pozisyon kapatıldı.")
         return
 
-    log("=== PİYASA TARAMASI BAŞLADI (En Hacimli 20 Coin) ===")
-    top_symbols = get_top_volume_usdt_pairs(public_client, limit=TOP_COINS_COUNT)
+    log("=== PİYASA TARAMASI BAŞLADI ===")
+    top_symbols = get_top_volume_usdt_pairs_fallback()
     
     best_symbol = None
     best_prob = 0.0
@@ -159,8 +166,9 @@ def run_bot_cycle():
     
     for symbol in top_symbols:
         try:
-            klines = public_client.get_klines(symbol=symbol, interval=INTERVAL, limit=200)
-            data = [{"Close": float(k[4]), "High": float(k[2]), "Low": float(k[3]), "Volume": float(k[5])} for k in klines]
+            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=200"
+            res = requests.get(url, timeout=5).json()
+            data = [{"Close": float(k[4]), "High": float(k[2]), "Low": float(k[3]), "Volume": float(k[5])} for k in res]
             df = pd.DataFrame(data)
             df_prepared = build_features(df)
             
